@@ -1,0 +1,252 @@
+\documentclass[11pt,a4paper,titlepage]{article}
+\usepackage[left=1.5cm,text={18cm, 25cm},top=2.5cm]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage[czech]{babel}
+\usepackage{float}
+\usepackage{color}
+\usepackage{hyperref}
+\usepackage{fancyvrb}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\definecolor{mGreen}{rgb}{0,0.6,0}
+\definecolor{mGray}{rgb}{0.5,0.5,0.5}
+\definecolor{mPurple}{rgb}{0.58,0,0.82}
+\definecolor{backgroundColour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{CStyle}{
+    commentstyle=\color{mGreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{mGray},
+    stringstyle=\color{mPurple},
+    basicstyle=\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                                 
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    language=C
+}
+
+\bibliographystyle{czplain}
+\setlength{\parindent}{0cm}
+\setlength{\parskip}{1em}
+\sloppy
+
+\hypersetup{
+	colorlinks=true,
+	linktoc=all,
+	linkcolor=blue,
+	citecolor=red,
+	urlcolor=blue,
+}
+
+\begin{document}
+
+		\setstretch{0.5}
+		\begin{center}
+
+			\includegraphics[width = 150mm]{logo.png}\\
+
+			\vspace{\stretch{0.382}}
+
+			\LARGE
+			Secure Hardware Devices\\
+			Microarchitectural Data Sampling\\
+			\vspace{\stretch{0.618}}
+
+		\end{center}
+
+	\Large{\today} \hfill Jiří Matějka (xmatej52)
+	\thispagestyle{empty}
+	\newpage
+	\setcounter{page}{1}
+
+    \tableofcontents
+	\newpage
+	\newpage
+
+    \section{Introduction}
+        Microarchitectural Data Sampling, also known as MDS, is a hardware vulnerability allowing unprivileged speculative access to data which are stored in various CPU buffers \cite{web:kernel}. There is set of possible attacks on MDS vulnerability -- ZombieLoad, RIDL and Fallout. Using these attacks, the attacker can gain access to potentially sensitive data, such as passwords or private keys.
+        
+        This vulnerability affects a wide range of Intel processors and is not present in processors from non-Intel vendors, Older processors (where CPU family is < 6), some Atoms processors (Bonnel, Saltwell, Goldmont and GoldmontPlus) and in intel processors which have the ARCH\_CAP\_MDS\_NO bit set in the IA32\_ARCH\_CAPABILITIES MSR \cite{web:kernel}.
+            
+        Sections with basic informations about RIDL (section \ref{introduction:ridl}), Fallout (section \ref{introduction:fallout}) and ZombieLoad (section \ref{introduction:zombieload}) were inspired by the Graz University of Technology web pages \cite{web:cpufail, web:zombieloadattack, web:ridl+fallout}.
+    
+        \subsection{RIDL} \label{introduction:ridl}
+            Rogue In-Flight Data Load is an exploit that allows the attacker to mount practical attacks and leak sensitive data in real-world settings. Data are leaked in-flight from different internal CPU buffers, that are used by the CPU while loading or storing data from memory.
+            
+            Attacker, who can run unprivileged code on machines with impacted CPUs, can access potentially sensitive data (such as passwords or encryption keys) using side channels. Malicious code can be run on shared cloud computing resources and since code can be written in JavaScript, the attacker can use websites or advertisement banners to execute an attack.
+        
+        \subsection{Fallout} \label{introduction:fallout}
+            The Fallout enables the attacker to leak data from store buffers, which are used every time a CPU pipeline need to store any data. The attacker can then pick later which data to leak from the CPU's store buffer.
+            
+            The Fallout attack can be also used to break kernel address space layout randomization, as well as to leak sensitive data written to memory by the operating system kernel.
+        
+        \subsection{ZombieLoad} \label{introduction:zombieload}
+            The ZombieLoad attack can exploit internal CPU buffers to get hold of data currently processed by other processes. These data can be user-level secrets, such as user keys, passwords, browser history and website content, or it can be system-level secrets, such as encryption keys. The ZombieLoad attack can be exploited on personal computers as well as in the cloud.
+    
+    \section{RIDL} \label{ridl}
+        This section will describe, how to attack victim virtual machine in the cloud using RIDL vulnerability. This tutorial is based on presentation and documentation provided by the Graz University of Technology \cite{web:ridlpresentation, web:ridldocumentation}.
+        
+        \subsection{Preparing the attack}
+            Our victim virtual machine is located in the cloud, so we need to get our virtual machine on the same server and make sure, that it is co-located via line fill buffers. Our victim virtual machine then runs the SSH server. Now we only need to:
+            \begin{itemize}
+                \item Get data in flight,
+                \item leak data,
+                \item filter data.
+            \end{itemize}
+        
+        \subsection{Getting data in flight}
+            The easiest part of mounting the attack is to get data in flight. To do so, we just need to connect to the SSH server. SSH server then will need to load data through line fill buffers. So after connecting to SSH server, file \textit{/etc/shadow} will be in flight.
+            
+        \subsection{Leaking data}
+            Since data are now in flight, it is possible to leak them. We start RIDL application on our virtual machine that will leak data from the line fill buffers.
+                    
+            The first step, the RIDL application should do, is to flush the cache. Since we will later detect cache hits, this step is necessary in order to correctly detect leaked data.
+
+            Next step is to leak data. This is how line fill buffers work:
+            \begin{enumerate}
+                \item Send out memory request,
+                \item allocate line fill buffers entry,
+                \item store address in line fill buffers,
+                \item serve other loads and stores,
+                \item pending request eventually completes.
+            \end{enumerate}
+            RIDL exploits problem, where there are data from a previous load operation in line fill buffers entry in the second step (allocation of line fill buffers entry). So now, we are ready to leak in-flight data from an invalid or unmapped page.
+            
+            To retrieve data, we will have to access the probe array and measure how long we waited for data. If we get data from specific index faster then from other indexes, the used index is leaked byte of data. Follows an example of possible RIDL application in C language:
+\begin{lstlisting}[style=CStyle]
+// Flush buffer entries
+for ( int i = 0; i < 256; i++ ) {
+    flush( probeArray + ( i * 4096 ) );
+}
+
+// Storing potentially leaked byte into variable
+char byte =  *( new_page );
+
+// Using leaked byte as an index into probeArray
+char *p   = probeArray + ( byte * 4096 )
+
+// Loading leaked byte into cache
+*( p );
+
+// Getting leaked byte from cache
+for ( int i = 0; i < 256; i++ ) {
+    
+    t0 = cycles();
+    *( volatile char * ) ( probeArray + ( i * 4096 ) );
+    dt = cycles() - t0;
+    
+    // If we accessed data quickly enought, current index is leaked byte
+    if ( dt < 100 ) {
+        results[ i ]++;
+    }
+}    
+\end{lstlisting}
+            
+        \subsection{Filtering data}
+        The last step is to filter leaked data -- we leak data that are in flight and not all of the leaked information is useful for us. But filtering data is easy -- we can use prefix matching (we know, that first line in /etc/shadow starts as root:) or a different method of filtering data based on the mask. Example of prefix matching:
+        
+\begin{Verbatim}[commandchars=\\\{\},codes={\catcode`$=3\catcode`_=8},samepage=false,frame=single]
+\textit{Iteration 1}
+Known prefix: "root:"
+Current data: https:// [No Match]
+Current data: root:Sp/ [Match, so we add "S" into result]
+ 
+\textit{Iteration 2}
+Known prefix: root:S
+Current data: someText [No Match]
+Current data: root:Sp/ [Match, so we add "p" into result]
+ 
+\textit{Iteration 3}
+Known prefix: root:Sp
+Current data: FILE.TXT [No Match]
+Current data: root:Sp/ [Match, so we add "/" into result]
+
+...
+\end{Verbatim}
+        
+    \section{Fallout} \label{fallout}
+        In this section, we will describe a simple fallout attack using Write Transient Forwarding, also known as WTF. Information about this attack was gathered from the Graz University of Technology documentation about Fallout attack \cite{web:falloutdocumentation}.
+    
+        \subsection{Store Buffer}
+            When the CPU needs to write data to memory, it writes them into store buffer. Thanks to this, CPU does not have to wait for a write to finish and can continue executing instructions from the current instruction stream. Meanwhile, the store buffer asynchronously ensures, that the results are written to memory.
+            
+        \subsection{Write Transient Forwarding}
+            Write Transient Forwarding incorrectly passes values from memory writes to subsequent faulting load operations. When a program attempts to read from an address, the CPU must first check the store buffers for write to the same address and perform store-to-ride forwarding if the address matches. Note, that the faulting load is transient and will not retire. However, the microarchitectural side effects of transient execution following the faulting load may result in an information leak.
+        
+            In this example, we will use non-canonical addresses to cause a fault since these addresses work reliably across all CPU generations. Note, that other exception causes are also possible. We refer to the Graz University of Technology documentation \cite{web:falloutdocumentation} to the detailed analysis of different exception types and how they may trigger WTF.
+        
+            First, we need to allocate a page, where the user can write and read data. Then we define pointer, which points to non-canonical address. Dereferencing such pointer will result in a general protection fault, faulting the dereferencing load. Then we store secret into the allocated page. CPU then allocates store buffer entry for holding the secret information to be written into memory.
+            
+            To read previous stores, we can dereference the defined pointer to the non-canonical address. We then suppress the general protection fault that results from this address using a TXS transaction. In the meantime, the CPU transiently forwards the value of the previous store at the same page offset. So, the memory access picks-up the value of the store to the allocated page. Using the cache-based covert channel, we transmit the incorrectly forwarded value.
+            
+            Using the same mechanism as in RIDL attack (section \ref{ridl}), we can retrieve data -- we access an array if the executing of the memory access instruction is faster then for other indexes, the current index is leaked byte.
+            
+\begin{lstlisting}[style=CStyle]
+// Allocates new page in user space
+char * allocatedPage = mmao(...);
+
+// Defining poiter to non-canonical address
+char* invalidAdress = 0x1478953214578952ull;
+
+// Writing secret information into allocated page 
+int index = 12;
+allocatedPage[ index ] = 111;
+
+// Accessing invalid adres using TSX, so exception is suppressed
+if ( tsx_begin() == 0 ) {
+    memory_access( probeArray + ( 4096 * invalidAdress[ index ] ) );
+    tsx_end();
+}
+
+// Getting leaked byte
+for ( int i = 0; i < 256; i++ ) {
+    
+    t0 = cycles();
+    *( volatile char * ) ( probeArray + ( i * 4096 ) );
+    dt = cycles() - t0;
+    
+    // If we accessed data quickly enought, current index is leaked byte
+    // It will be fastest for i == 111
+    if ( dt < 100 ) {
+        results[ i ]++;
+    }
+}    
+\end{lstlisting}
+
+            This code shows, that it is possible to leak data without directly accessing allocatedPage array, so leak of potentially sensitive information is possible.
+
+    \section{ZombieLoad} \label{zombieload}
+        Due to limited size of this article,, ZombieLoad will be described briefly and we will not provide any source code of possible attack. All the information was gained from documentation provided by the Graz University of Technology \cite{web:zombieloaddocumentation}.
+        
+        \subsection{About ZombieLoad}
+            ZombieLoad is a transient-execution attack that observes the values of memory loads and stores on the CPU core. This attack exploits, that the fill buffer is used by all logical CPUs of a CPU core and that it does not distinguish between processes or privileges.
+                
+            If there is memory load during execution, CPU reserves an entry in the load buffer. If the load was not an L1 cache hit, it requires a fill-buffer entry. If store operations miss the L1 cache, data are temporarily stored in the fill-buffer entry as well.
+            
+            But under certain conditions (as a fault for example), where the load requires microcode assist, it may first read state values before being re-issued. This opens a transient-execution window, where the value can be used for subsequent calculation. Thanks to this, an attacker is able to store the leaked value into the cache.
+            
+            With the ZombieLoad attack, the attacker is not able to select the value to leak based on an attacker-specified address. The ZombieLoad attack leaks any value which is currently loaded or stored by the physical CPU core.
+    
+        \subsection{ZombieLoad attack via Intel TSX Transaction}
+            To execute this attack, it is necessary to have allocated physical page that is user-accessible via virtual address $v$ (any page allocated in user space fulfil this requirement). Inside a TSX transaction, encode the value of $v$ into the cache using convert-channel -- the same way as in Fallout scenario (section \ref{fallout}). Although this is a legitimate load to the user-accessible address $v$ and should not itself cause the TSX transaction fail, the TSX transaction fails and does not commit due to included conflicts in the read set. There is an only transient fault which results into a zombie load (a load, that is either architectural or microarchitectural fault and thus cannot complete, requiring a re-issue of the load at a later point).
+            
+            Note, that there two other attack scenarios in the documentation provided by the Graz University of Technology \cite{web:zombieloaddocumentation}. This approach was chosen because it works even with hardware fixes for Meltdown.
+            
+            
+    \section{Conclusion}
+        The goal of this project was to create a tutorial on how to execute an attack using Microarchitectural Data Sampling vulnerability in 4 -- 6 pages of text. In this article, we described RIDL attack (section \ref{ridl}), Fallout attack (section \ref{fallout}) and ZombieLoad attack (section \ref{zombieload}). In all of these attacks, we briefly described possible scenarios and for RIDL and Fallout attacks, we also provided source codes for a better understanding of the attacks.
+        
+        Provided information about these attack should be sufficient to mount an attack on vulnerable devices if certain conditions for each attack are fulfilled. Provided source code should ease the development of such applications. Note, that this article is an academic study and abuse of this vulnerability may be illegal and is at least immoral.
+    
+    \newpage
+    \bibliography{zdroje}
+
+\end{document}
